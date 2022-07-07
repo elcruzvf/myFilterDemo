@@ -1,0 +1,223 @@
+﻿labsuser@ubuntu1804:~/Ansible$ cat inventories/jenkins_nodes.yml 
+---
+all:
+  children:
+    controllers:
+      hosts:
+        jenkins_controller:
+          ansible_host: 18.234.164.119
+      vars:
+        packages: [ 'git', 'default-jre', 'jenkins' ]
+    agents:
+      hosts:
+        jenkins_agent__build:
+          ansible_host: 54.145.77.60
+        jenkins_agent__test:
+          ansible_host: 44.202.217.15
+      vars:
+        packages: [ 'git', 'default-jre', 'maven' ]
+
+
+
+
+Playbook:
+
+
+labsuser@ubuntu1804:~/Ansible$ cat main.yml 
+---
+
+- hosts: controllers
+  tasks:
+
+    - name: Install Jenkins repository
+      block:
+        - name: Add Jenkins apt repository key
+          apt_key:
+            url: "https://pkg.jenkins.io/debian-stable/jenkins.io.key"
+            state: present
+          become: yes
+          when: inventory_hostname in groups['controllers']
+    
+        - name: Add Jenkins apt repository
+          apt_repository:
+            repo: "deb https://pkg.jenkins.io/debian-stable binary/"
+            state: present
+            update_cache: yes
+          become: yes
+
+    - name: Install required packages
+      apt:
+        pkg: '{{ packages }}'
+        update_cache: yes
+      become: yes
+
+    - name: Jenkins activation
+      block:
+        - name: Reload systemd so that it becomes aware of the jenkins service
+          systemd:
+            daemon_reload: yes
+          become: yes
+    
+        - name: Start jenkins
+          systemd:
+            name: jenkins
+            state: started
+          become: yes
+     
+    - name: Create and install a SSH key pair for the user Jenkins at the controller node
+      block:
+        - name: Generate an SSH key pair
+          command : ssh-keygen -t rsa -f /var/lib/jenkins/.ssh/id_rsa
+          args:
+            creates: /var/lib/jenkins/.ssh/id_rsa
+          become: yes
+          become_user: jenkins
+          become_method: sudo
+          vars:
+            allow_world_readable_tmpfiles: true
+
+        - name: Set the correct permissions for the .ssh directory
+          file: dest=/var/lib/jenkins/.ssh mode=0700
+    
+    - name: Retrieve public key
+      shell: cat /var/lib/jenkins/.ssh/id_rsa.pub
+      register: master_public_key
+      changed_when: false
+      become: yes
+
+- hosts: agents
+  tasks:
+
+    - name: Add jenkins user in all agent nodes
+      user:
+        name: jenkins
+        home: /var/lib/jenkins
+      become: yes
+
+    - name: Add master public key to the authorized_keys file of the jenkins user in all agent nodes
+      authorized_key:
+        user: jenkins
+        key: "{{ hostvars[item].master_public_key.stdout }}"
+      become: yes
+      loop: "{{ groups['controllers']|flatten(levels=1) }}"
+ 
+
+
+
+
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 3.27"
+    }
+  }
+  required_version = ">= 0.14.9"
+}
+
+provider "aws" {
+  profile = "default"
+  region  = "us-east-1"
+}
+
+
+resource "aws_vpc" "vpc_001" {
+    cidr_block = "10.0.0.0/16"
+    enable_dns_support = "true"
+    enable_dns_hostnames = "true"
+    enable_classiclink = "false"
+    instance_tenancy = "default"
+}
+
+resource "aws_subnet" "subnet_001" {
+    vpc_id = "${aws_vpc.vpc_001.id}"
+    cidr_block = "10.0.1.0/24"
+    availability_zone = "us-east-1a"
+}
+
+resource "aws_internet_gateway" "gw_001" {
+    vpc_id = "${aws_vpc.vpc_001.id}"
+}
+
+resource "aws_route_table" "crt_001" {
+    vpc_id = "${aws_vpc.vpc_001.id}"
+    route {
+        cidr_block = "0.0.0.0/0"
+        // Gateway to reach the Internet
+        gateway_id = "${aws_internet_gateway.gw_001.id}"
+    }
+}
+
+
+resource "aws_route_table_association" "crt_001--subnet_001"{
+    subnet_id = "${aws_subnet.subnet_001.id}"
+    route_table_id = "${aws_route_table.crt_001.id}"
+}
+
+
+resource "aws_security_group" "allow_ssh" {
+    vpc_id = "${aws_vpc.vpc_001.id}"
+    egress {
+        from_port = 0
+        to_port = 0
+        protocol = -1
+        cidr_blocks = ["0.0.0.0/0"]
+    }
+    ingress {
+        // allow SSH access to the servers hosting the Jenkins nodes
+        from_port = 22
+        to_port = 22
+        protocol = "tcp"
+        // from the IP address of the lab virtual machine
+        cidr_blocks = ["35.90.90.38/32"]
+    }
+    ingress {
+        // allow access to the Jenkins controller
+        from_port = 8080
+        to_port = 8080
+        protocol = "tcp"
+        // from the IP address of the lab virtual machine
+        cidr_blocks = ["35.90.90.38/32"]
+    }
+}
+
+resource "aws_key_pair" "deployer" {
+  key_name   = "deployer"
+  public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDR0KcVXoaxgVleVtkDxA+Vs1iQNR5Jc4kQaMkaLcNMsBHkEf8QXBZRkg646Cf/+0LXFEX6rE36vAYw/gcdkjSaGuecCTTTeLv9VFg11jn7msNdDFdElDbZ+npxALJ7yBa+y9CMfnGcfjeTm6Hn2vZ27Uvbh7ZPINUVqDB7HaMycu8SZ/vHMH/F+5E+7aEb4Q/mW0wZr9hv+kumyvKjU66S/2zly2e6qIeC9k6jwd40DXHVeJLLHK2BYui8pDfZhKjL4QL3KXUNZj9GT0O8YhjFD/7kH0Jkte+lw3cWhDAn39IuetRqo/pXH5DKQxNx34fQUtgHjhhOsT+8TSt3R+Bl labsuser@ubuntu1804"
+}
+
+resource "aws_instance" "jenkins_controller" {
+  ami           = "ami-0c4f7023847b90238"
+  instance_type = "t2.micro"
+  associate_public_ip_address = "true"
+  subnet_id = "${aws_subnet.subnet_001.id}"
+  vpc_security_group_ids = ["${aws_security_group.allow_ssh.id}"]
+  key_name = "deployer"
+  tags = {
+    Name = "jenkins_controller"
+  }
+}
+
+resource "aws_instance" "jenkins_agent__build" {
+  ami           = "ami-0c4f7023847b90238"
+  instance_type = "t2.micro"
+  associate_public_ip_address = "true"
+  subnet_id = "${aws_subnet.subnet_001.id}"
+  vpc_security_group_ids = ["${aws_security_group.allow_ssh.id}"]
+  key_name = "deployer"
+  tags = {
+    Name = "jenkins_agent__build"
+  }
+}
+
+resource "aws_instance" "jenkins_agent__test" {
+  ami           = "ami-0c4f7023847b90238"
+  instance_type = "t2.micro"
+  associate_public_ip_address = "true"
+  subnet_id = "${aws_subnet.subnet_001.id}"
+  vpc_security_group_ids = ["${aws_security_group.allow_ssh.id}"]
+  key_name = "deployer"
+  tags = {
+    Name = "jenkins_agent__test"
+  }
+}
