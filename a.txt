@@ -1,100 +1,17 @@
-﻿all:
-  children:
-    controllers:
-      hosts:
-        jenkins_controller:
-          ansible_host: 18.234.164.119
-      vars:
-        packages: [ 'git', 'default-jre', 'jenkins' ]
-    agents:
-      hosts:
-        jenkins_agent__build:
-          ansible_host: 54.145.77.60
-        jenkins_agent__test:
-          ansible_host: 44.202.217.15
-      vars:
-        packages: [ 'git', 'default-jre', 'maven' ]
+﻿ - name: Creates database for WordPress
+      mysql_db:
+        name: "{{ mysql_db }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      tags: [ mysql ]
 
-
-
-
-Playbook:
-
-
-labsuser@ubuntu1804:~/Ansible$ cat main.yml 
----
-
-- hosts: controllers
-  tasks:
-
-    - name: Install Jenkins repository
-      block:
-        - name: Add Jenkins apt repository key
-          apt_key:
-            url: "https://pkg.jenkins.io/debian-stable/jenkins.io.key"
-            state: present
-          become: yes
-          when: inventory_hostname in groups['controllers']
-    
-        - name: Add Jenkins apt repository
-          apt_repository:
-            repo: "deb https://pkg.jenkins.io/debian-stable binary/"
-            state: present
-            update_cache: yes
-          become: yes
-
-    - name: Install required packages
-      apt:
-        pkg: '{{ packages }}'
-        update_cache: yes
-      become: yes
-
-    - name: Jenkins activation
-      block:
-        - name: Reload systemd so that it becomes aware of the jenkins service
-          systemd:
-            daemon_reload: yes
-          become: yes
-    
-        - name: Start jenkins
-          systemd:
-            name: jenkins
-            state: started
-          become: yes
-     
-    - name: Create and install a SSH key pair for the user Jenkins at the controller node
-      block:
-        - name: Generate an SSH key pair
-          command : ssh-keygen -t rsa -f /var/lib/jenkins/.ssh/id_rsa
-          args:
-            creates: /var/lib/jenkins/.ssh/id_rsa
-          become: yes
-          become_user: jenkins
-          become_method: sudo
-          vars:
-            allow_world_readable_tmpfiles: true
-
-        - name: Set the correct permissions for the .ssh directory
-          file: dest=/var/lib/jenkins/.ssh mode=0700
-    
-    - name: Retrieve public key
-      shell: cat /var/lib/jenkins/.ssh/id_rsa.pub
-      register: master_public_key
-      changed_when: false
-      become: yes
-
-- hosts: agents
-  tasks:
-
-    - name: Add jenkins user in all agent nodes
-      user:
-        name: jenkins
-        home: /var/lib/jenkins
-      become: yes
-
-    - name: Add master public key to the authorized_keys file of the jenkins user in all agent nodes
-      authorized_key:
-        user: jenkins
-        key: "{{ hostvars[item].master_public_key.stdout }}"
-      become: yes
-      loop: "{{ groups['controllers']|flatten(levels=1) }}"
+    - name: Create MySQL user for WordPress
+      mysql_user:
+        name: "{{ mysql_user }}"
+        password: "{{ mysql_password }}"
+        priv: "{{ mysql_db }}.*:ALL"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      tags: [ mysql ]
